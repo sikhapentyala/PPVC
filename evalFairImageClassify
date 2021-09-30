@@ -1,0 +1,153 @@
+# define settings and params
+num_classes = 7 #int(program.args[1])  # 6
+N = int(program.args[1])   # num of images 10
+h = 48 #int(program.args[3])   # 48
+w = 48 #int(program.args[4])   # 48
+c = 1 #int(program.args[5])   #  1
+
+program.use_split(3)
+program.options.cisc = True
+
+
+
+from ml import *
+Layer.n_threads = 4
+FixConv2d.use_conv2ds = True
+
+# define architecture of the CNN
+layers = [
+        FixConv2d([1,48,48,1], (5,5,1,64), (64,), [1, 44, 44, 64], (1, 1), padding='VALID', tf_weight_format='True'),
+        Relu([1, 44, 44, 64]),
+        FixAveragePool2d((1, 44, 44, 64), (1, 20, 20, 64), (5, 5),(2,2)),
+        FixConv2d((1, 20, 20, 64), ( 3, 3, 64, 64), (64,), (1, 18, 18, 64), (1, 1), padding='VALID', tf_weight_format='True'),
+        Relu([1, 18, 18, 64]),
+        FixConv2d((1, 18, 18, 64), (3, 3, 64,64), (64,), (1, 16, 16, 64), (1, 1), padding='VALID', tf_weight_format='True'),
+        Relu([1, 16, 16, 64]),
+        FixAveragePool2d((1, 16, 16, 64), (1, 7, 7, 64), (3, 3),(2,2)),
+        FixConv2d((1, 7, 7, 64), ( 3, 3, 64,128), (128,), (1, 5, 5, 128), (1, 1), padding='VALID', tf_weight_format='True'),
+        Relu([1, 5, 5, 128]),
+        FixConv2d((1, 5, 5, 128), ( 3, 3, 128,128), (128,), (1, 3, 3, 128), (1, 1), padding='VALID', tf_weight_format='True'),
+        Relu([1, 3, 3, 128]),
+        FixAveragePool2d((1, 3, 3, 128), (1, 1, 1, 128), (3, 3),(2,2)),
+        Dense(1,128,1024,activation='relu'),
+        Dense(1,1024,1024,activation='relu'),
+        Dense(1,1024,7,activation='id'),
+        Argmax((1, 7))
+        ]
+
+# read secret shares of images
+alice = MultiArray([N,h,w,c],sfix)
+alice.input_from(0)
+
+# get labels
+y_truth = Array(N,sint)
+y_truth.input_from(0)
+
+# get sensitive attributes 0: female 1: male
+sensitive = Array(N,sint)
+sensitive.input_from(0)
+
+# read secret shares of model parameters
+for layer in layers:
+        layer.input_from(1)
+
+
+# define predicted array
+y_predict = Array(N,sint)
+
+
+# private frame classification for all selected frames
+@for_range(N)
+def _(i):
+        graph = Optimizer()
+        graph.layers = layers 
+        layers[0].X.assign_vector(alice[i].get_vector())
+        #for layer in layers:
+        #        layer.input_from(1)
+        graph.forward(1)
+        y_predict[i] = layers[-1].Y[0]
+
+
+#print_ln('y_predicted %s',y_predict.reveal_nested())
+
+TP_M = Array(num_classes,sint)
+TN_M = Array(num_classes,sint)
+FP_M = Array(num_classes,sint)
+FN_M = Array(num_classes,sint)
+
+TP_F = Array(num_classes,sint)
+TN_F = Array(num_classes,sint)
+FP_F = Array(num_classes,sint)
+FN_F = Array(num_classes,sint)
+
+#################################################################################################
+#  ytrue==class ypred==class    metric      ytrue!=class ypred!=class   Formula
+#     1             1             TP             0           0           ytrue==class * ypred==class
+#     1             0             FN             0           1           ytrue==class * ypred!=class
+#     0             1             FP             1           0           ytrue!=class * ypred==class
+#     0             0             TN             1           1           ytrue!=class * ypred!=class
+#
+####################################################################################################
+
+
+
+for class_ in range(num_classes):
+        @for_range_opt(N)
+        def _(i):
+                truth_is_class = y_truth[i].__eq__(class_)
+                pred_is_class = y_predict[i].__eq__(class_)
+
+                is_Protected = sensitive[i]
+
+
+                tp = truth_is_class * pred_is_class   
+                tm =is_Protected * truth_is_class
+                pm = is_Protected * pred_is_class
+                tpm = is_Protected * tp
+
+                TP_M[class_] = TP_M[class_] +    tpm
+                FN_M[class_] = FN_M[class_] +   (tm - tpm)
+                FP_M[class_] = FP_M[class_] + (pm - tpm)
+                TN_M[class_] = TN_M[class_] + (is_Protected - tm -pm + tpm)
+
+                TP_F[class_] = TP_F[class_] + (tp - tpm)
+                FN_F[class_] = FN_F[class_] + (truth_is_class - tm - tp + tpm)
+                FP_F[class_] = FP_F[class_] + (pred_is_class - pm - tp + tpm)
+                TN_F[class_] = TN_F[class_] + (1 - truth_is_class - pred_is_class + tp - is_Protected +tm +pm-tpm)
+
+                '''
+                truth_is_not_class = 1 - truth_is_class
+                pred_is_not_class = 1 - pred_is_class
+
+                is_Male = gender[i]
+
+                tp = truth_is_class * pred_is_class
+                fn = truth_is_class * pred_is_not_class
+                fp = truth_is_not_class * pred_is_class
+                tn = truth_is_not_class * pred_is_not_class
+
+                TP_M[class_] = TP_M[class_] + (is_Male * tp)
+                FN_M[class_] = FN_M[class_] + (is_Male * fn)
+                FP_M[class_] = FP_M[class_] + (is_Male * fp)
+                TN_M[class_] = TN_M[class_] + (is_Male * tn)
+
+                TP_F[class_] = TP_F[class_] + ((1-is_Male) * tp)
+                FN_F[class_] = FN_F[class_] + ((1-is_Male) * fn)
+                FP_F[class_] = FP_F[class_] + ((1-is_Male) * fp)
+                TN_F[class_] = TN_F[class_] + ((1-is_Male) * tn)
+                '''
+
+print_ln('Male:')
+print_ln('TP %s',TP_M.reveal_nested())
+print_ln('TN %s',TN_M.reveal_nested())
+print_ln('FP %s',FP_M.reveal_nested())
+print_ln('FN %s',FN_M.reveal_nested())
+
+print_ln('FeMale:')
+print_ln('TP %s',TP_F.reveal_nested())
+print_ln('TN %s',TN_F.reveal_nested())
+print_ln('FP %s',FP_F.reveal_nested())
+print_ln('FN %s',FN_F.reveal_nested())
+
+
+

@@ -1,0 +1,91 @@
+# define settings and params
+program.options.cisc = True
+from ml import *
+program.use_trunc_pr = False
+Layer.n_threads = 16
+FixConv2d.use_conv2ds = True
+
+num_labels = 7
+N = 97
+h = 48
+w = 48
+c = 1
+n = 7
+tot_elems = h*w*c #2304
+#sfix.set_precision(12, 31)
+
+# define architecture of the CNN
+layers = [
+        FixConv2d([1,48,48,1], (5,5,1,64), (64,), [1, 44, 44, 64], (1, 1), padding='VALID', tf_weight_format='True'),
+        Relu([1, 44, 44, 64]),
+        FixAveragePool2d((1, 44, 44, 64), (1, 20, 20, 64), (5, 5),(2,2)),
+        FixConv2d((1, 20, 20, 64), ( 3, 3, 64, 64), (64,), (1, 18, 18, 64), (1, 1), padding='VALID', tf_weight_format='True'),
+        Relu([1, 18, 18, 64]),
+        FixConv2d((1, 18, 18, 64), (3, 3, 64,64), (64,), (1, 16, 16, 64), (1, 1), padding='VALID', tf_weight_format='True'),
+        Relu([1, 16, 16, 64]),
+        FixAveragePool2d((1, 16, 16, 64), (1, 7, 7, 64), (3, 3),(2,2)),
+        FixConv2d((1, 7, 7, 64), ( 3, 3, 64,128), (128,), (1, 5, 5, 128), (1, 1), padding='VALID', tf_weight_format='True'),
+        Relu([1, 5, 5, 128]),
+        FixConv2d((1, 5, 5, 128), ( 3, 3, 128,128), (128,), (1, 3, 3, 128), (1, 1), padding='VALID', tf_weight_format='True'),
+        Relu([1, 3, 3, 128]),
+        FixAveragePool2d((1, 3, 3, 128), (1, 1, 1, 128), (3, 3),(2,2)),
+        Dense(1,128,1024,activation='relu'),
+        Dense(1,1024,1024,activation='relu'),
+        Dense(1,1024,7,activation='id'),
+        ImprovedApproxSoftmax((1,7))
+        ]
+
+# define variables and read secret shares
+cum_emot_vals = Array(num_labels,sfix)
+cum_emot_vals.assign_all(0)
+
+#start_timer(100) # Time for frame selection protocol including reading inputs
+alice = MultiArray([N,h,w,c],sfix)
+alice.input_from(0)
+bob = sfix.Matrix(n,N) # input will be matrix 0 1 0 0, 0 0 0 1
+bob.input_from(1)
+
+start_timer(100)
+# oblivious frame selection
+alice_reform = sfix.Matrix(N,tot_elems)
+@for_range(N)
+def _(i):
+        alice_reform[i].assign_vector(alice[i].get_vector())
+selected_frames = sfix.Matrix(n,tot_elems)
+#selected_frames.assign_vector(bob.direct_mul(alice_reform))
+selected_frames = bob.direct_mul_to_matrix(alice_reform)
+stop_timer(100)
+
+# private frame classification for all selected frames
+@for_range(n)
+def _(i):
+        graph = Optimizer()
+        graph.layers = layers 
+        #layers[0].X.input_from(1)
+        start_timer(200)
+        layers[0].X.assign_vector(selected_frames[i].get_vector())
+        for layer in layers:
+                layer.input_from(1)
+        start_timer(300)
+        graph.forward(1)
+        stop_timer(300)
+        stop_timer(200)
+        '''
+        @for_range(7)
+        def _(f):
+                print_ln("At %s logit is %s", f, layers[-2].Y[0][0][f].reveal())
+                        @for_range(7)
+        def _(f):
+                print_ln("At %s prob is %s", f, layers[-1].Y[f].reveal())
+        '''
+        start_timer(400)
+        # secure index wise sum in secure label aggregation
+        cum_emot_vals.assign_vector(cum_emot_vals.__add__(layers[-1].Y))
+        stop_timer(400)
+
+start_timer(500)
+x = argmax(cum_emot_vals.get_vector())
+stop_timer(500)
+# secure argmax and reveal in secure label aggregation
+print_ln("%s", x.reveal())
+#stop_timer(500)
